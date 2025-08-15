@@ -5,6 +5,7 @@
 " let g:pr_comments_max_length = 300  " Maximum comment length in quickfix (default: 300)
 " let g:pr_comments_show_full = 1      " Show full comments without truncation (default: 0)
 " let g:pr_comments_wrap_quickfix = 1  " Enable line wrapping in quickfix (default: 0)
+" let g:pr_comments_show_resolved = 0  " Show resolved comments (default: 0)
 
 " Script variables for caching
 let s:cached_pr_number = ''
@@ -39,10 +40,10 @@ function! s:GetPRNumber(branch)
   return pr_number
 endfunction
 
-function! s:FetchPRComments(pr_number)
-  " Check cache
-  if s:cached_pr_number == a:pr_number && len(s:cached_comments) > 0
-    echo "Using cached comments for PR #" . a:pr_number
+function! s:FetchPRComments(pr_number, force_refresh)
+  " Check cache unless force refresh is requested
+  if !a:force_refresh && s:cached_pr_number == a:pr_number && len(s:cached_comments) > 0
+    echo "Using cached comments for PR #" . a:pr_number . " (use :PRCommentsReload to refresh)"
     return s:cached_comments
   endif
   
@@ -52,6 +53,7 @@ function! s:FetchPRComments(pr_number)
     return []
   endif
   
+  " Fetch comments via REST API
   let cmd = 'gh api repos/' . repo_info . '/pulls/' . a:pr_number . '/comments'
   let json_output = system(cmd)
   if v:shell_error != 0
@@ -61,6 +63,40 @@ function! s:FetchPRComments(pr_number)
   
   try
     let comments = json_decode(json_output)
+    
+    " Also fetch thread resolution status via GraphQL
+    let [owner, repo] = split(repo_info, '/')
+    let query = printf('query { repository(owner:"%s", name:"%s") { pullRequest(number:%d) { reviewThreads(first:100) { nodes { id isResolved comments(first:100) { nodes { databaseId } } } } } } }',
+          \ owner, repo, a:pr_number)
+    
+    let result = system('gh api graphql --field query=' . shellescape(query))
+    
+    if v:shell_error == 0
+      try
+        let data = json_decode(result)
+        let threads = data.data.repository.pullRequest.reviewThreads.nodes
+        
+        " Add resolved status to each comment
+        for comment in comments
+          let comment.is_resolved = 0
+          for thread in threads
+            for thread_comment in thread.comments.nodes
+              if thread_comment.databaseId == comment.id
+                let comment.is_resolved = thread.isResolved
+                break
+              endif
+            endfor
+            if comment.is_resolved
+              break
+            endif
+          endfor
+        endfor
+      catch
+        " If GraphQL fails, continue without resolution status
+        echo "Warning: Could not fetch resolution status"
+      endtry
+    endif
+    
     " Update cache
     let s:cached_pr_number = a:pr_number
     let s:cached_comments = comments
@@ -139,6 +175,29 @@ function! s:ExtractCodeContext(diff_hunk, line_offset)
   return join(context, ' | ')
 endfunction
 
+function! s:IsCommentResolved(comment)
+  " Check GitHub's resolved state for the comment
+  " GitHub review comments have an 'in_reply_to_id' field when they're replies
+  " and a conversation can be marked as resolved
+  
+  " Check if comment has resolved_at field (GitHub's resolution timestamp)
+  if has_key(a:comment, 'resolved_at') && a:comment.resolved_at != v:null
+    return 1
+  endif
+  
+  " Check if comment has resolved field
+  if has_key(a:comment, 'resolved') && a:comment.resolved
+    return 1
+  endif
+  
+  " Check if it's part of a resolved conversation
+  if has_key(a:comment, 'is_resolved') && a:comment.is_resolved
+    return 1
+  endif
+  
+  return 0
+endfunction
+
 function! s:FormatCommentForQuickfix(comment, index)
   let entry = {}
   
@@ -193,7 +252,15 @@ function! s:FormatCommentForQuickfix(comment, index)
     endif
   endif
   
-  let entry.text = printf("[%d] %s: %s", a:index, author, body)
+  " Check if comment is resolved
+  let is_resolved = s:IsCommentResolved(a:comment)
+  
+  " Add resolved marker to text if resolved
+  if is_resolved
+    let entry.text = printf("[%d] [RESOLVED] %s: %s", a:index, author, body)
+  else
+    let entry.text = printf("[%d] %s: %s", a:index, author, body)
+  endif
   
   " Store full comment details for later retrieval
   let s:comment_details[a:index] = {
@@ -206,7 +273,8 @@ function! s:FormatCommentForQuickfix(comment, index)
     \   has_key(a:comment, 'line') ? string(a:comment.line) : 'null',
     \   has_key(a:comment, 'original_line') ? string(a:comment.original_line) : 'null',
     \   has_key(a:comment, 'position') ? string(a:comment.position) : 'null'),
-    \ 'resolved_line': entry.lnum
+    \ 'resolved_line': entry.lnum,
+    \ 'is_resolved': is_resolved
     \ }
   
   " Use different types for different authors
@@ -247,11 +315,15 @@ function! ReplyToComment()
         return
       endif
       
-      " Get PR number
+      " Get PR number from cache or detect it
       let pr_number = s:cached_pr_number
       if pr_number == ''
         let branch = s:GetCurrentBranch()
         let pr_number = s:GetPRNumber(branch)
+        if pr_number == ''
+          echoerr "Could not determine PR number"
+          return
+        endif
       endif
       
       " Get repo info
@@ -349,57 +421,86 @@ function! ResolveComment()
         return
       endif
       
-      " Get PR number
+      " Get PR number from cache or detect it
       let pr_number = s:cached_pr_number
       if pr_number == ''
         let branch = s:GetCurrentBranch()
         let pr_number = s:GetPRNumber(branch)
+        if pr_number == ''
+          echoerr "Could not determine PR number"
+          return
+        endif
       endif
       
       " Get repo info
       let repo_info = trim(system('gh repo view --json nameWithOwner -q .nameWithOwner'))
       
-      " GitHub doesn't have a true "resolve" API for PR review comments
-      " We'll add a reply with a resolution marker
-      let resolution_text = "✅ Resolved"
-      
-      " For inline review comments, post as a reply
-      if has_key(comment, 'pull_request_review_id') && has_key(comment, 'id')
-        " Create JSON payload for the resolution marker
-        let json_body = json_encode({'body': resolution_text})
+      " GitHub's resolve functionality requires the thread ID, not the comment ID
+      " We need to fetch the thread ID first
+      if has_key(comment, 'id') && has_key(comment, 'pull_request_review_id')
+        " Get repo info
+        let [owner, repo] = split(repo_info, '/')
         
-        " Try to post a reply to the specific comment thread
-        let cmd = printf('gh api -X POST repos/%s/pulls/%s/comments/%d/replies --input -',
-              \ repo_info,
-              \ pr_number,
-              \ comment.id)
+        " First, get the thread ID for this comment
+        let query = printf('query { repository(owner:"%s", name:"%s") { pullRequest(number:%d) { reviewThreads(first:100) { nodes { id isResolved comments(first:100) { nodes { id databaseId } } } } } } }',
+              \ owner, repo, pr_number)
         
-        echo "\nMarking comment as resolved..."
-        let result = system(cmd, json_body)
+        echo "\nFinding review thread..."
+        let result = system('gh api graphql --field query=' . shellescape(query))
         
-        if v:shell_error != 0
-          " Fallback: Create a review with resolution comment
-          echo "\nTrying review-based resolution..."
-          
-          let review_json = json_encode({
-                \ 'body': 'Resolving review comments',
-                \ 'event': 'COMMENT',
-                \ 'comments': [{
-                \   'path': comment.path,
-                \   'line': has_key(comment, 'line') && comment.line != v:null ? comment.line : comment.original_line,
-                \   'side': has_key(comment, 'side') ? comment.side : 'RIGHT',
-                \   'body': resolution_text
-                \ }]
-                \ })
-          
-          let cmd = printf('gh api -X POST repos/%s/pulls/%s/reviews --input -',
-                \ repo_info,
-                \ pr_number)
-          
-          let result = system(cmd, review_json)
+        if v:shell_error == 0
+          try
+            let data = json_decode(result)
+            let threads = data.data.repository.pullRequest.reviewThreads.nodes
+            let thread_id = ''
+            
+            " Find the thread containing our comment
+            for thread in threads
+              for thread_comment in thread.comments.nodes
+                if thread_comment.databaseId == comment.id
+                  let thread_id = thread.id
+                  let is_already_resolved = thread.isResolved
+                  break
+                endif
+              endfor
+              if thread_id != ''
+                break
+              endif
+            endfor
+            
+            if thread_id == ''
+              echoerr "\nCould not find thread for this comment"
+              return
+            endif
+            
+            if is_already_resolved
+              echo "\nComment thread is already resolved"
+              return
+            endif
+            
+            " Now resolve the thread
+            let mutation = json_encode({
+                  \ 'query': 'mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }',
+                  \ 'variables': {'threadId': thread_id}
+                  \ })
+            
+            echo "\nResolving comment thread..."
+            let result = system('gh api graphql --input -', mutation)
+            
+            if v:shell_error != 0
+              echoerr "\nFailed to resolve thread. You may not have permission to resolve this comment."
+              return
+            endif
+          catch
+            echoerr "\nFailed to parse GraphQL response"
+            return
+          endtry
+        else
+          echoerr "\nFailed to fetch thread information"
+          return
         endif
       else
-        echoerr "\nCannot resolve: Missing comment ID or review ID"
+        echoerr "\nCannot resolve: This doesn't appear to be a review comment"
         return
       endif
       
@@ -491,16 +592,15 @@ function! ShowCommentDetail()
 endfunction
 
 function! PRComments(...)
-  " Optional argument to force refresh or debug
-  let force_refresh = a:0 > 0 && (a:1 == '!' || a:1 == 'refresh')
+  " Optional argument to force refresh, debug, or show all
+  let force_refresh = a:0 > 0 && (a:1 == 'reload' || a:1 == 'refresh' || a:1 == '!')
   let debug_mode = a:0 > 0 && a:1 == 'debug'
+  let show_all = a:0 > 0 && (a:1 == 'all' || a:1 == 'show-resolved')
   
   if force_refresh
-    let s:cached_pr_number = ''
-    let s:cached_comments = []
-    echo "Cache cleared, fetching fresh PR comments..."
+    echo "Reloading PR comments from GitHub..."
   else
-    echo "Fetching PR comments..."
+    echo "Opening PR comments..."
   endif
   
   " Get current branch
@@ -525,8 +625,8 @@ function! PRComments(...)
   
   echo "Found PR #" . pr_number . " for branch " . branch
   
-  " Fetch comments from PR
-  let comments = s:FetchPRComments(pr_number)
+  " Fetch comments from PR (with force_refresh flag)
+  let comments = s:FetchPRComments(pr_number, force_refresh)
   if len(comments) == 0
     echo "No inline comments found in PR #" . pr_number
     return
@@ -535,13 +635,30 @@ function! PRComments(...)
   " Clear previous comment details
   let s:comment_details = {}
   
+  " Determine if we should show resolved comments
+  let show_resolved = show_all || (exists('g:pr_comments_show_resolved') && g:pr_comments_show_resolved)
+  
   " Format comments for quickfix
   let qf_list = []
   let index = 1
+  let resolved_count = 0
+  let total_count = 0
+  
   for comment in comments
     let entry = s:FormatCommentForQuickfix(comment, index)
     if entry != {}
-      call add(qf_list, entry)
+      let total_count += 1
+      " Check if this comment is resolved
+      if s:comment_details[index].is_resolved
+        let resolved_count += 1
+        " Only add resolved comments if we're showing them
+        if show_resolved
+          call add(qf_list, entry)
+        endif
+      else
+        " Always add unresolved comments
+        call add(qf_list, entry)
+      endif
       let index += 1
     endif
   endfor
@@ -560,30 +677,155 @@ function! PRComments(...)
       autocmd FileType qf nnoremap <buffer> <Space> :call ShowCommentDetail()<CR>
       autocmd FileType qf nnoremap <buffer> r :call ReplyToComment()<CR>
       autocmd FileType qf nnoremap <buffer> R :call ResolveComment()<CR>
+      autocmd FileType qf nnoremap <buffer> U :call UnresolveComment()<CR>
       " Enable line wrapping if configured
       if exists('g:pr_comments_wrap_quickfix') && g:pr_comments_wrap_quickfix
         autocmd FileType qf setlocal wrap linebreak
       endif
     augroup END
     
-    echo "Loaded " . len(qf_list) . " comments from PR #" . pr_number 
-          \ . " | Keys: Space=details, r=reply, R=resolve"
+    " Build status message
+    let status_msg = "Loaded " . len(qf_list) . " comments from PR #" . pr_number
+    if resolved_count > 0
+      if show_resolved
+        let status_msg .= " (including " . resolved_count . " resolved)"
+      else
+        let status_msg .= " (" . resolved_count . " resolved hidden, use :PRCommentsAll to show)"
+      endif
+    endif
+    let status_msg .= " | Keys: Space=details, r=reply, R=resolve, U=unresolve"
+    echo status_msg
   else
-    echo "Failed to parse comments from PR #" . pr_number
+    if total_count > 0 && len(qf_list) == 0
+      echo "All " . total_count . " comments are resolved! Use :PRCommentsAll to show them."
+    else
+      echo "Failed to parse comments from PR #" . pr_number
+    endif
+  endif
+endfunction
+
+function! UnresolveComment()
+  " Get current quickfix item
+  let qf_index = line('.') - 1
+  let qf_list = getqflist()
+  
+  if qf_index < 0 || qf_index >= len(qf_list)
+    echo "No comment selected"
+    return
+  endif
+  
+  let item = qf_list[qf_index]
+  let text = item.text
+  
+  " Extract comment index
+  let matches = matchlist(text, '^\[\(\d\+\)\]')
+  if len(matches) > 1
+    let comment_index = str2nr(matches[1])
+    if comment_index > 0 && comment_index <= len(s:cached_comments)
+      let comment = s:cached_comments[comment_index - 1]
+      
+      if !has_key(comment, 'id') || !has_key(comment, 'pull_request_review_id')
+        echoerr "Cannot unresolve: This doesn't appear to be a review comment"
+        return
+      endif
+      
+      " Confirm unresolve
+      if confirm("Unresolve this comment?", "&Yes\n&No", 2) != 1
+        echo "Unresolve cancelled"
+        return
+      endif
+      
+      " Get PR number and repo info
+      let pr_number = s:cached_pr_number
+      if pr_number == ''
+        let branch = s:GetCurrentBranch()
+        let pr_number = s:GetPRNumber(branch)
+      endif
+      
+      let repo_info = trim(system('gh repo view --json nameWithOwner -q .nameWithOwner'))
+      let [owner, repo] = split(repo_info, '/')
+      
+      " First, get the thread ID for this comment
+      let query = printf('query { repository(owner:"%s", name:"%s") { pullRequest(number:%d) { reviewThreads(first:100) { nodes { id isResolved comments(first:100) { nodes { id databaseId } } } } } } }',
+            \ owner, repo, pr_number)
+      
+      echo "\nFinding review thread..."
+      let result = system('gh api graphql --field query=' . shellescape(query))
+      
+      if v:shell_error == 0
+        try
+          let data = json_decode(result)
+          let threads = data.data.repository.pullRequest.reviewThreads.nodes
+          let thread_id = ''
+          let is_already_unresolved = 0
+          
+          " Find the thread containing our comment
+          for thread in threads
+            for thread_comment in thread.comments.nodes
+              if thread_comment.databaseId == comment.id
+                let thread_id = thread.id
+                let is_already_unresolved = !thread.isResolved
+                break
+              endif
+            endfor
+            if thread_id != ''
+              break
+            endif
+          endfor
+          
+          if thread_id == ''
+            echoerr "\nCould not find thread for this comment"
+            return
+          endif
+          
+          if is_already_unresolved
+            echo "\nComment thread is already unresolved"
+            return
+          endif
+          
+          " Now unresolve the thread
+          let mutation = json_encode({
+                \ 'query': 'mutation($threadId: ID!) { unresolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }',
+                \ 'variables': {'threadId': thread_id}
+                \ })
+          
+          echo "\nUnresolving comment thread..."
+          let result = system('gh api graphql --input -', mutation)
+          
+          if v:shell_error == 0
+            echo "\nComment marked as unresolved"
+            " Update the display to remove [RESOLVED] marker
+            let item.text = substitute(item.text, '\[RESOLVED\] ', '', '')
+            call setqflist(qf_list, 'r')
+          else
+            echoerr "\nFailed to unresolve thread. You may not have permission."
+          endif
+        catch
+          echoerr "\nFailed to parse GraphQL response"
+        endtry
+      else
+        echoerr "\nFailed to fetch thread information"
+      endif
+    endif
   endif
 endfunction
 
 " Create commands
 command! -nargs=? PRComments call PRComments(<f-args>)
+command! PRCommentsOpen call PRComments()
+command! PRCommentsReload call PRComments('reload')
 command! PRCommentsRefresh call PRComments('refresh')
+command! PRCommentsAll call PRComments('all')
 command! PRCommentsDebug call PRComments('debug')
 command! PRCommentDetail call ShowCommentDetail()
 command! PRCommentReply call ReplyToComment()
 command! PRCommentResolve call ResolveComment()
+command! PRCommentUnresolve call UnresolveComment()
 
 " Create mappings (customize as needed)
-nnoremap <leader>prc :PRComments<CR>
-nnoremap <leader>prr :PRCommentsRefresh<CR>
+nnoremap <leader>prc :PRCommentsOpen<CR>
+nnoremap <leader>prr :PRCommentsReload<CR>
+nnoremap <leader>pra :PRCommentsAll<CR>
 
 " Add quickfix navigation helpers
 nnoremap ]c :cnext<CR>

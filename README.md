@@ -1,15 +1,32 @@
-# PR Comments for Vim
+# vim-pr-comments
 
-A Vim plugin to fetch GitHub PR inline comments and display them in the quickfix list for easy navigation.
+**Complete GitHub PR review workflow directly in Vim** - Read, reply, and resolve PR comments without leaving your editor.
 
 ## Features
 
-- Fetches inline comments from GitHub PRs using `gh` CLI
-- Displays comments in Vim's quickfix list
-- Jump directly to file and line where comment was made
-- Shows comment author and text
-- Caches comments to avoid repeated API calls
-- Full comment detail view with diff context
+### 🔍 View PR Comments
+- Fetches all inline review comments from GitHub PRs
+- Displays in Vim's quickfix list for easy navigation
+- Jump directly to exact file and line locations
+- Shows comment author and full text
+- Automatically detects resolved/unresolved status
+
+### 💬 Interactive Review
+- **Reply to comments** - Respond directly from Vim (`r` key)
+- **Resolve threads** - Mark conversations as resolved (`R` key)
+- **Unresolve threads** - Reopen resolved conversations (`U` key)
+- Full GitHub PR review workflow without context switching
+
+### ⚡ Performance
+- Smart caching for instant reopening
+- Separate commands for cached vs fresh data
+- Batch GraphQL queries for efficiency
+
+### 🎨 Customizable Display
+- Hide resolved comments by default
+- Configurable comment truncation
+- Line wrapping options
+- Detailed preview mode
 
 ## Requirements
 
@@ -19,18 +36,36 @@ A Vim plugin to fetch GitHub PR inline comments and display them in the quickfix
 
 ## Installation
 
-### With Vundle
-Already installed in `~/.vim/bundle/pr-comments/`
-
-### Manual Installation
-```bash
-mkdir -p ~/.vim/plugin
-cp plugin/pr-comments.vim ~/.vim/plugin/
+### Using Vundle
+```vim
+Plugin 'ashot/vim-pr-comments'
 ```
+
+### Using vim-plug
+```vim
+Plug 'ashot/vim-pr-comments'
+```
+
+### Using Pathogen
+```bash
+cd ~/.vim/bundle
+git clone https://github.com/ashot/vim-pr-comments
+```
+
+## Quick Start
+
+1. Navigate to any file in a Git repo with an open PR
+2. Run `:PRCommentsOpen` to load comments
+3. Use quickfix window to navigate and interact:
+   - `Enter` - Jump to comment location
+   - `Space` - View full comment details
+   - `r` - Reply to comment
+   - `R` - Resolve comment thread
+   - `U` - Unresolve comment thread
 
 ## Configuration
 
-Add these to your `.vimrc` to customize the plugin:
+Add to your `.vimrc`:
 
 ```vim
 " Maximum comment length in quickfix (default: 300 chars)
@@ -41,67 +76,101 @@ let g:pr_comments_show_full = 1
 
 " Enable line wrapping in quickfix window (default: 0)
 let g:pr_comments_wrap_quickfix = 1
+
+" Show resolved comments by default (default: 0 - hidden)
+let g:pr_comments_show_resolved = 0
 ```
 
 ## Usage
 
 ### Commands
 
-- `:PRComments` - Fetch PR comments for current branch (uses cache if available)
-- `:PRCommentsRefresh` - Force refresh, clearing cache
-- `:PRCommentsDebug` - Show debug information for troubleshooting
-- `:PRCommentDetail` - Show full comment details in preview window
-- `:PRCommentReply` - Reply to the selected comment
-- `:PRCommentResolve` - Mark comment as resolved
+#### Primary Commands
+- `:PRCommentsOpen` - Open comments (uses cache if available)
+- `:PRCommentsReload` - Force refresh from GitHub
+- `:PRCommentsAll` - Show all comments including resolved
+
+#### Additional Commands
+- `:PRCommentsDebug` - Show debug information
+- `:PRCommentDetail` - Show full comment in preview
+- `:PRCommentReply` - Reply to selected comment
+- `:PRCommentResolve` - Resolve selected thread
+- `:PRCommentUnresolve` - Unresolve selected thread
 
 ### Default Mappings
 
-- `<leader>prc` - Fetch PR comments
-- `<leader>prr` - Refresh PR comments (force refresh)
-- `]c` - Next comment in quickfix
-- `[c` - Previous comment in quickfix
-- `]C` - Last comment
-- `[C` - First comment
+#### Global
+- `<leader>prc` - Open PR comments (cached)
+- `<leader>prr` - Reload PR comments (fresh)
+- `<leader>pra` - Show all including resolved
+- `]c` / `[c` - Next/previous comment
+- `]C` / `[C` - Last/first comment
 
-### Quickfix Window Mappings
+#### Quickfix Window
+- `<CR>` - Jump to location and close quickfix
+- `o` - Jump to location (keep quickfix open)
+- `<Space>` - Show full comment details
+- `r` - Reply to comment
+- `R` - Resolve comment thread
+- `U` - Unresolve comment thread
 
-- `<CR>` - Jump to file/line and close quickfix
-- `o` - Jump to file/line (keep quickfix open)
-- `<Space>` - Show full comment details in preview window
-- `r` - Reply to the selected comment
-- `R` - Resolve the selected comment (adds a ✅ resolved marker)
-- `q` - Close detail window (when in detail view)
+## Workflow Example
+
+```vim
+:PRCommentsOpen          " Load PR comments
+" Navigate with j/k in quickfix
+<Space>                  " Read full comment
+r                        " Type reply and hit enter
+R                        " Mark thread as resolved
+:PRCommentsReload        " Refresh after new comments
+:PRCommentsAll           " Show resolved comments too
+```
 
 ## How It Works
 
-1. Detects current Git branch
-2. Finds associated PR using `gh pr list`
-3. Fetches inline comments via GitHub API
-4. Parses comments and extracts file paths and line numbers
-5. Populates Vim's quickfix list
-6. Allows navigation to exact comment locations
+1. Detects current Git branch and finds associated PR
+2. Fetches comments via GitHub REST API
+3. Queries GraphQL for resolution status
+4. Populates quickfix with smart line number detection
+5. Uses GraphQL mutations for resolve/unresolve
+6. Posts replies to the correct review thread
 
-## Comment Types
+## Comment Resolution
 
-- `E` (Error) - Human reviewer comments
-- `W` (Warning) - Bot comments (e.g., Copilot suggestions)
+- **Resolved comments hidden by default** - Keeps focus on active discussions
+- **View resolved with** `:PRCommentsAll`
+- **Resolution state from GitHub** - Not based on comment text
+- **Proper thread management** - Resolves entire conversation thread
 
 ## Tips
 
-- Comments are cached per PR to improve performance
-- Use `:PRCommentsRefresh` to get latest comments after new ones are added
-- The quickfix title shows PR number and comment count
-- Press `<Space>` on any comment in quickfix to see full details including:
-  - Full comment text (not truncated)
-  - Author and timestamp
-  - Diff context
-  - URL to GitHub comment
+- Comments are cached per session for fast access
+- Use `:PRCommentsReload` after new comments are added
+- Press `<Space>` in quickfix for full comment with code context
+- The plugin shows comment count and resolution status
+- Line numbers auto-adjust for file changes since review
 
 ## Troubleshooting
 
-- **"No PR found for branch"** - Ensure your branch has an open PR on GitHub
-- **"Failed to fetch PR comments"** - Check that `gh` CLI is authenticated: `gh auth status`
-- **Line numbers incorrect** - The plugin uses the line numbers from when the comment was made; if the file has changed significantly, positions may be off
+### "No PR found for branch"
+Ensure your branch has an open PR on GitHub
+
+### "Failed to fetch PR comments"  
+Check `gh` CLI authentication:
+```bash
+gh auth status
+gh pr view  # Should show your PR
+```
+
+### "Cannot resolve: permission denied"
+You need write access to the repository to resolve comments
+
+### Line numbers incorrect
+Comments use line numbers from when they were created. If files changed significantly, positions may be approximate.
+
+## Contributing
+
+Issues and PRs welcome at [github.com/ashot/vim-pr-comments](https://github.com/ashot/vim-pr-comments)
 
 ## License
 
