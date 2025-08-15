@@ -62,11 +62,12 @@ function! s:FetchPRComments(pr_number, force_refresh)
   endif
   
   try
-    let comments = json_decode(json_output)
+    let all_comments = json_decode(json_output)
+    let comments = []
     
-    " Also fetch thread resolution status via GraphQL
+    " Fetch full thread data including replies via GraphQL
     let [owner, repo] = split(repo_info, '/')
-    let query = printf('query { repository(owner:"%s", name:"%s") { pullRequest(number:%d) { reviewThreads(first:100) { nodes { id isResolved comments(first:100) { nodes { databaseId } } } } } } }',
+    let query = printf('query { repository(owner:"%s", name:"%s") { pullRequest(number:%d) { reviewThreads(first:100) { nodes { id isResolved comments(first:50) { nodes { id databaseId body author { login } createdAt } } } } } } }',
           \ owner, repo, a:pr_number)
     
     let result = system('gh api graphql --field query=' . shellescape(query))
@@ -76,25 +77,71 @@ function! s:FetchPRComments(pr_number, force_refresh)
         let data = json_decode(result)
         let threads = data.data.repository.pullRequest.reviewThreads.nodes
         
-        " Add resolved status to each comment
-        for comment in comments
-          let comment.is_resolved = 0
-          for thread in threads
-            for thread_comment in thread.comments.nodes
-              if thread_comment.databaseId == comment.id
-                let comment.is_resolved = thread.isResolved
-                break
-              endif
-            endfor
-            if comment.is_resolved
-              break
+        " Build a map of thread starters and collect reply IDs to filter out
+        let reply_ids = {}
+        let thread_map = {}
+        
+        for thread in threads
+          if len(thread.comments.nodes) > 0
+            " First comment is the thread starter
+            let thread_map[thread.comments.nodes[0].databaseId] = {
+                  \ 'isResolved': thread.isResolved,
+                  \ 'replies': []
+                  \ }
+            
+            " Collect replies (all comments after the first)
+            if len(thread.comments.nodes) > 1
+              for i in range(1, len(thread.comments.nodes) - 1)
+                let reply = thread.comments.nodes[i]
+                " Mark this as a reply so we can filter it out
+                let reply_ids[reply.databaseId] = 1
+                
+                " Add to thread starter's replies
+                call add(thread_map[thread.comments.nodes[0].databaseId].replies, {
+                      \ 'author': has_key(reply.author, 'login') ? reply.author.login : 'Unknown',
+                      \ 'body': reply.body,
+                      \ 'created_at': has_key(reply, 'createdAt') ? reply.createdAt : ''
+                      \ })
+              endfor
             endif
-          endfor
+          endif
+        endfor
+        
+        " Filter comments to only include thread starters, not replies
+        for comment in all_comments
+          " Skip if this is a reply to another comment
+          if has_key(reply_ids, comment.id)
+            continue
+          endif
+          
+          " Add thread data if available
+          if has_key(thread_map, comment.id)
+            let comment.is_resolved = thread_map[comment.id].isResolved
+            let comment.replies = thread_map[comment.id].replies
+          else
+            let comment.is_resolved = 0
+            let comment.replies = []
+          endif
+          
+          " Add to final comments list
+          call add(comments, comment)
         endfor
       catch
-        " If GraphQL fails, continue without resolution status
-        echo "Warning: Could not fetch resolution status"
+        " If GraphQL fails, use all comments without filtering
+        echo "Warning: Could not fetch thread data, showing all comments"
+        let comments = all_comments
+        for comment in comments
+          let comment.is_resolved = 0
+          let comment.replies = []
+        endfor
       endtry
+    else
+      " If GraphQL fails, use all comments
+      let comments = all_comments
+      for comment in comments
+        let comment.is_resolved = 0
+        let comment.replies = []
+      endfor
     endif
     
     " Update cache
@@ -244,11 +291,44 @@ function! s:FormatCommentForQuickfix(comment, index)
   " Clean up multiple spaces
   let body = substitute(body, '\s\+', ' ', 'g')
   
+  " Build the main comment text
+  let comment_text = body
+  
+  " Add replies if they exist - show last 2 replies
+  if has_key(a:comment, 'replies') && len(a:comment.replies) > 0
+    let reply_count = len(a:comment.replies)
+    
+    if reply_count > 2
+      " Show collapsed count and last 2 replies
+      let comment_text .= printf(" [...%d more...] ", reply_count - 2)
+    endif
+    
+    " Show last 2 replies (or all if less than 3)
+    let start_idx = reply_count > 2 ? reply_count - 2 : 0
+    for i in range(start_idx, reply_count - 1)
+      let reply = a:comment.replies[i]
+      let reply_body = reply.body
+      " Clean up reply body
+      let reply_body = substitute(reply_body, '```suggestion.*```', '[suggestion]', 'gs')
+      let reply_body = substitute(reply_body, '```.*```', '[code]', 'gs')
+      let reply_body = substitute(reply_body, '\n', ' ', 'g')
+      let reply_body = substitute(reply_body, '\s\+', ' ', 'g')
+      
+      " Truncate reply if needed
+      if len(reply_body) > 60
+        let reply_body = reply_body[0:57] . '...'
+      endif
+      
+      " Add reply
+      let comment_text .= printf(" [↪ %s: %s]", reply.author, reply_body)
+    endfor
+  endif
+  
   " Truncate long comments for quickfix display (configurable)
   if !exists('g:pr_comments_show_full') || !g:pr_comments_show_full
     let max_length = exists('g:pr_comments_max_length') ? g:pr_comments_max_length : 300
-    if len(body) > max_length
-      let body = body[0:max_length-3] . '...'
+    if len(comment_text) > max_length
+      let comment_text = comment_text[0:max_length-3] . '...'
     endif
   endif
   
@@ -257,9 +337,9 @@ function! s:FormatCommentForQuickfix(comment, index)
   
   " Add resolved marker to text if resolved
   if is_resolved
-    let entry.text = printf("[%d] [RESOLVED] %s: %s", a:index, author, body)
+    let entry.text = printf("[%d] [RESOLVED] %s: %s", a:index, author, comment_text)
   else
-    let entry.text = printf("[%d] %s: %s", a:index, author, body)
+    let entry.text = printf("[%d] %s: %s", a:index, author, comment_text)
   endif
   
   " Store full comment details for later retrieval
@@ -378,10 +458,6 @@ function! ReplyToComment()
       
       if v:shell_error == 0
         echo "\nReply posted successfully!"
-        " Optionally refresh comments
-        if confirm("Refresh comments to see your reply?", "&Yes\n&No", 1) == 1
-          call PRComments('refresh')
-        endif
       else
         echoerr "\nFailed to post reply: " . result
       endif
@@ -415,11 +491,7 @@ function! ResolveComment()
         return
       endif
       
-      " Confirm resolution
-      if confirm("Resolve this comment?", "&Yes\n&No", 2) != 1
-        echo "Resolution cancelled"
-        return
-      endif
+      " No confirmation - just resolve
       
       " Get PR number from cache or detect it
       let pr_number = s:cached_pr_number
@@ -561,6 +633,26 @@ function! ShowCommentDetail()
         call append(line_num, body_line)
         let line_num += 1
       endfor
+      
+      " Add replies if available
+      let comment = s:cached_comments[comment_index - 1]
+      if has_key(comment, 'replies') && len(comment.replies) > 0
+        call append(line_num, '')
+        call append(line_num + 1, 'Replies:')
+        call append(line_num + 2, '--------')
+        let line_num = line_num + 3
+        
+        for reply in comment.replies
+          call append(line_num, '')
+          call append(line_num + 1, '  ➤ ' . reply.author . ' (' . reply.created_at . '):')
+          let reply_lines = split(reply.body, '\n')
+          let line_num = line_num + 2
+          for reply_line in reply_lines
+            call append(line_num, '    ' . reply_line)
+            let line_num += 1
+          endfor
+        endfor
+      endif
       
       " Add diff context if available
       if detail.diff_hunk != ''
@@ -729,11 +821,7 @@ function! UnresolveComment()
         return
       endif
       
-      " Confirm unresolve
-      if confirm("Unresolve this comment?", "&Yes\n&No", 2) != 1
-        echo "Unresolve cancelled"
-        return
-      endif
+      " No confirmation - just unresolve
       
       " Get PR number and repo info
       let pr_number = s:cached_pr_number
