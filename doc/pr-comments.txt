@@ -1,0 +1,127 @@
+*pr-comments.txt*  GitHub PR Comments for Vim
+
+CONTENTS                                        *pr-comments-contents*
+
+    1. Introduction ................ |pr-comments-intro|
+    2. Requirements ................ |pr-comments-requirements|
+    3. Installation ................ |pr-comments-installation|
+    4. Configuration ............... |pr-comments-configuration|
+    5. Commands .................... |pr-comments-commands|
+    6. Mappings .................... |pr-comments-mappings|
+    7. Troubleshooting ............. |pr-comments-troubleshooting|
+
+==============================================================================
+INTRODUCTION                                    *pr-comments-intro*
+
+This plugin fetches GitHub PR inline comments and displays them in Vim's
+quickfix list, allowing you to navigate directly to commented code, reply
+to comments, and mark them as resolved.
+
+==============================================================================
+REQUIREMENTS                                    *pr-comments-requirements*
+
+- Vim 8.0+ or Neovim
+- `gh` CLI tool installed and authenticated
+- Git repository with a GitHub remote
+
+==============================================================================
+INSTALLATION                                    *pr-comments-installation*
+
+Using Vundle:
+>
+    Plugin 'ashot/vim-pr-comments'
+<
+
+Using vim-plug:
+>
+    Plug 'ashot/vim-pr-comments'
+<
+
+Manual installation:
+>
+    git clone https://github.com/ashot/vim-pr-comments ~/.vim/bundle/pr-comments
+<
+
+==============================================================================
+CONFIGURATION                                   *pr-comments-configuration*
+
+                                                *g:pr_comments_max_length*
+g:pr_comments_max_length~
+    Maximum comment length in quickfix (default: 300)
+>
+    let g:pr_comments_max_length = 500
+<
+
+                                                *g:pr_comments_show_full*
+g:pr_comments_show_full~
+    Show full comments without truncation (default: 0)
+>
+    let g:pr_comments_show_full = 1
+<
+
+                                                *g:pr_comments_wrap_quickfix*
+g:pr_comments_wrap_quickfix~
+    Enable line wrapping in quickfix window (default: 0)
+>
+    let g:pr_comments_wrap_quickfix = 1
+<
+
+==============================================================================
+COMMANDS                                        *pr-comments-commands*
+
+                                                *:PRComments*
+:PRComments
+    Fetch PR comments for current branch (uses cache if available)
+
+                                                *:PRCommentsRefresh*
+:PRCommentsRefresh
+    Force refresh, clearing cache
+
+                                                *:PRCommentsDebug*
+:PRCommentsDebug
+    Show debug information for troubleshooting
+
+                                                *:PRCommentDetail*
+:PRCommentDetail
+    Show full comment details in preview window
+
+                                                *:PRCommentReply*
+:PRCommentReply
+    Reply to the selected comment
+
+                                                *:PRCommentResolve*
+:PRCommentResolve
+    Mark comment as resolved
+
+==============================================================================
+MAPPINGS                                        *pr-comments-mappings*
+
+Global mappings:
+    <leader>prc     Fetch PR comments
+    <leader>prr     Refresh PR comments
+    ]c              Next comment in quickfix
+    [c              Previous comment in quickfix
+    ]C              Last comment
+    [C              First comment
+
+Quickfix window mappings:
+    <CR>            Jump to file/line and close quickfix
+    o               Jump to file/line (keep quickfix open)
+    <Space>         Show full comment details
+    r               Reply to comment
+    R               Resolve comment
+
+==============================================================================
+TROUBLESHOOTING                                 *pr-comments-troubleshooting*
+
+"No PR found for branch"
+    Ensure your branch has an open PR on GitHub
+
+"Failed to fetch PR comments"
+    Check that `gh` CLI is authenticated: `gh auth status`
+
+Line numbers incorrect
+    The plugin uses line numbers from when the comment was made; if the
+    file has changed significantly, positions may be off
+
+ vim:tw=78:ts=8:ft=help:norl:
