@@ -430,26 +430,93 @@ function! ReplyToComment()
         let result = system(cmd, json_body)
         
         if v:shell_error != 0
-          " If replies endpoint fails, try creating a review with the comment
-          echo "\nTrying review-based reply..."
-          
-          " Create a review that replies to this thread
-          let review_json = json_encode({
-                \ 'body': 'Replying to review comments',
-                \ 'event': 'COMMENT',
-                \ 'comments': [{
-                \   'path': comment.path,
-                \   'line': has_key(comment, 'line') && comment.line != v:null ? comment.line : comment.original_line,
-                \   'side': has_key(comment, 'side') ? comment.side : 'RIGHT',
-                \   'body': reply
-                \ }]
-                \ })
-          
-          let cmd = printf('gh api -X POST repos/%s/pulls/%s/reviews --input -',
-                \ repo_info,
-                \ pr_number)
-          
-          let result = system(cmd, review_json)
+          " Check if error is due to pending review
+          if result =~ 'pending review' || result =~ 'Unprocessable Entity'
+            echo "\nDetected pending review. Creating reply with in_reply_to..."
+            
+            " When there's a pending review, we need to use in_reply_to parameter
+            " to ensure our comment is a reply to the existing thread
+            let review_comment_json = json_encode({
+                  \ 'body': reply,
+                  \ 'path': comment.path,
+                  \ 'line': has_key(comment, 'line') && comment.line != v:null ? comment.line : comment.original_line,
+                  \ 'side': has_key(comment, 'side') ? comment.side : 'RIGHT',
+                  \ 'in_reply_to': comment.id
+                  \ })
+            
+            " Post as a new review comment with in_reply_to
+            let add_cmd = printf('gh api -X POST repos/%s/pulls/%s/comments --input -',
+                  \ repo_info,
+                  \ pr_number)
+            
+            let result = system(add_cmd, review_comment_json)
+            
+            if v:shell_error == 0
+              echo "\nReply posted successfully (added to pending review)."
+            else
+              " No pending review found, create new one
+              echo "\nCreating new review with comment..."
+              let review_json = json_encode({
+                    \ 'body': '',
+                    \ 'event': 'PENDING',
+                    \ 'comments': [{
+                    \   'path': comment.path,
+                    \   'line': has_key(comment, 'line') && comment.line != v:null ? comment.line : comment.original_line,
+                    \   'side': has_key(comment, 'side') ? comment.side : 'RIGHT',
+                    \   'body': reply
+                    \ }]
+                    \ })
+              
+              let cmd = printf('gh api -X POST repos/%s/pulls/%s/reviews --input -',
+                    \ repo_info,
+                    \ pr_number)
+              
+              let result = system(cmd, review_json)
+              
+              if v:shell_error == 0
+                " Now submit it immediately
+                echo "\nSubmitting review..."
+                let submit_json = json_encode({
+                      \ 'body': '',
+                      \ 'event': 'COMMENT'
+                      \ })
+                
+                " Get the review ID from result
+                try
+                  let review_data = json_decode(result)
+                  if has_key(review_data, 'id')
+                    let submit_cmd = printf('gh api -X POST repos/%s/pulls/%s/reviews/%d/events --input -',
+                          \ repo_info,
+                          \ pr_number,
+                          \ review_data.id)
+                    
+                    let submit_result = system(submit_cmd, submit_json)
+                  endif
+                catch
+                  " Ignore if we can't parse
+                endtry
+              endif
+            endif
+          else
+            " Other error - try creating a simple review comment
+            echo "\nTrying simple review comment..."
+            let review_json = json_encode({
+                  \ 'body': '',
+                  \ 'event': 'COMMENT',
+                  \ 'comments': [{
+                  \   'path': comment.path,
+                  \   'line': has_key(comment, 'line') && comment.line != v:null ? comment.line : comment.original_line,
+                  \   'side': has_key(comment, 'side') ? comment.side : 'RIGHT',
+                  \   'body': reply
+                  \ }]
+                  \ })
+            
+            let cmd = printf('gh api -X POST repos/%s/pulls/%s/reviews --input -',
+                  \ repo_info,
+                  \ pr_number)
+            
+            let result = system(cmd, review_json)
+          endif
         endif
       else
         echoerr "\nCannot reply: Missing comment ID or review ID"
